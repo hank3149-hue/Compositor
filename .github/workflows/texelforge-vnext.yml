@@ -1,0 +1,72 @@
+name: TexelForge vNext staged validation
+
+on:
+  push:
+    branches: [ texelforge-vnext ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Reconstruct exact source ZIP
+        shell: python
+        run: |
+          import base64, glob, hashlib, pathlib, zipfile
+          parts = sorted(glob.glob("texelforge-source/part*.b64"))
+          assert len(parts) == 10, f"Expected 10 chunks, found {len(parts)}"
+          encoded = "".join(pathlib.Path(p).read_text(encoding="utf-8") for p in parts)
+          raw = base64.b64decode(encoded, validate=True)
+          digest = hashlib.sha256(raw).hexdigest()
+          expected = "5cb6eee7c31bdaf781887e965df219857c1d2e239c7dc7be17f387c7c8842d5a"
+          print("ZIP SHA-256:", digest)
+          assert digest == expected, f"Archive hash mismatch: {digest}"
+          zip_path = pathlib.Path("TexelForgeStudio-v0.1.0-source.zip")
+          zip_path.write_bytes(raw)
+          with zipfile.ZipFile(zip_path) as z:
+              z.testzip()
+              z.extractall("stage")
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore stage/TexelForgeStudio/tests/TexelForge.Core.Tests/TexelForge.Core.Tests.csproj
+
+      - name: Build
+        run: dotnet build stage/TexelForgeStudio/src/TexelForge.App/TexelForge.App.csproj -c Release --no-restore
+
+      - name: Core validation
+        run: dotnet run --project stage/TexelForgeStudio/tests/TexelForge.Core.Tests/TexelForge.Core.Tests.csproj -c Release
+
+      - name: Publish current OS
+        shell: python
+        run: |
+          import platform, subprocess
+          rid = "win-x64" if platform.system() == "Windows" else ("osx-arm64" if platform.machine().lower() in ("arm64","aarch64") else "osx-x64")
+          subprocess.check_call([
+              "dotnet","publish",
+              "stage/TexelForgeStudio/src/TexelForge.App/TexelForge.App.csproj",
+              "-c","Release","-r",rid,"--self-contained","true",
+              "-p:PublishSingleFile=true","-p:DebugType=None",
+              "-o",f"dist/{rid}"
+          ])
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TexelForge-${{ matrix.os }}
+          path: dist
